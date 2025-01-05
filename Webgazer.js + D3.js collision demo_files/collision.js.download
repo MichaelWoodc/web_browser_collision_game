@@ -1,0 +1,270 @@
+// Set to true if you want to save the data even if you reload the page.
+window.saveDataAcrossSessions = false;
+
+const collisionSVG = "collisionSVG";
+var nodes = [];
+var clickCounts = {}; // Keeps track of clicks on each node
+var totalClicks = 0;  // Track total clicks across all balls
+
+// Maximum speed factor (set lower for slower movement)
+const MAX_SPEED = 3;  // Increased speed slightly for stronger movement
+const MAX_GAZE_REPULSION = 10; // Increased gaze repulsion strength
+
+window.onload = async function () {
+    if (!window.saveDataAcrossSessions) {
+        var localstorageDataLabel = 'webgazerGlobalData';
+        localforage.setItem(localstorageDataLabel, null);
+        var localstorageSettingsLabel = 'webgazerGlobalSettings';
+        localforage.setItem(localstorageSettingsLabel, null);
+    }
+
+    const webgazerInstance = await webgazer
+        .setRegression('ridge')
+        .setTracker('TFFacemesh')
+        .begin();
+
+    webgazerInstance.showVideoPreview(true)
+        .showPredictionPoints(false)
+        .applyKalmanFilter(true);
+
+    setupCollisionSystem();
+    webgazer.setGazeListener(collisionEyeListener);
+
+    // Mouse listener for interaction
+    window.addEventListener("mousemove", mouseListener);
+};
+
+window.onbeforeunload = function () {
+    if (window.saveDataAcrossSessions) {
+        webgazer.end();
+    } else {
+        localforage.clear();
+    }
+};
+
+// Setup collision system and initialize balls
+function setupCollisionSystem() {
+    var width = window.innerWidth;
+    var height = window.innerHeight;
+
+    var numberOfNodes = 5; // Five balls
+
+    // Initialize nodes with random positions and velocities
+    nodes = d3.range(numberOfNodes).map(function (_, index) {
+        clickCounts[index] = 0; // Initialize click count for each ball
+        return {
+            radius: Math.random() * 12 + 20,
+            x: Math.random() * width,
+            y: Math.random() * height,
+            vx: (Math.random() - 0.5) * 2, // Slower initial velocity
+            vy: (Math.random() - 0.5) * 2, // Slower initial velocity
+            id: index,
+            isRed: index === 0 // Make the first ball red and excluded from movement
+        };
+    });
+
+    // Create SVG container
+    var svg = d3.select("body").append("svg")
+        .attr("id", collisionSVG)
+        .attr("width", width)
+        .attr("height", height)
+        .style("top", "0px")
+        .style("left", "0px")
+        .style("margin", "0px")
+        .style("position", "absolute")
+        .style("z-index", 100000);
+
+    // Create unique colors for nodes
+    var color = d3.scale.category10();
+    var colors = nodes.map((_, i) => color(i));
+
+    // Add circles to SVG
+    var circles = svg.selectAll("circle")
+        .data(nodes)
+        .enter()
+        .append("circle")
+        .attr("r", d => d.radius)
+        .style("fill", (d, i) => d.isRed ? "red" : colors[i])
+        .on("click", function (event, d) {
+            clickCounts[d.id] += 1;
+            totalClicks++; // Update total click count
+            console.log(`Ball ${d.id} clicked ${clickCounts[d.id]} times`);
+
+            // Update the scoreboard
+            d3.select("#scoreboard")
+                .text(`Total Clicks: ${totalClicks}`);
+        });
+
+    // Add gaze lines and prediction square
+    svg.append("line")
+        .attr("id", "eyeline1")
+        .attr("stroke-width", 2)
+        .attr("stroke", "red");
+
+    svg.append("line")
+        .attr("id", "eyeline2")
+        .attr("stroke-width", 2)
+        .attr("stroke", "red");
+
+    svg.append("circle")
+        .attr("id", "gazePoint")
+        .attr("r", 5)
+        .attr("fill", "red");
+
+    // Animation loop for movement and collisions
+    function tick() {
+        nodes.forEach((node) => {
+            // Update positions with velocities
+            node.x += node.vx;
+            node.y += node.vy;
+
+            // Bounce off walls
+            if (node.x - node.radius < 0 || node.x + node.radius > width) {
+                node.vx *= -1;
+                node.x = Math.max(node.radius, Math.min(node.x, width - node.radius));
+            }
+            if (node.y - node.radius < 0 || node.y + node.radius > height) {
+                node.vy *= -1;
+                node.y = Math.max(node.radius, Math.min(node.y, height - node.radius));
+            }
+
+            // Clamp the speed after every update to avoid growing too large
+            var speed = Math.sqrt(node.vx * node.vx + node.vy * node.vy);
+            if (speed > MAX_SPEED) {
+                var scalingFactor = MAX_SPEED / speed;
+                node.vx *= scalingFactor;
+                node.vy *= scalingFactor;
+            }
+        });
+
+        // Handle collisions between nodes (Perfectly elastic collisions)
+        for (let i = 0; i < nodes.length; i++) {
+            for (let j = i + 1; j < nodes.length; j++) {
+                handleCollision(nodes[i], nodes[j]);
+            }
+        }
+
+        // Update circle positions
+        circles.attr("cx", d => d.x)
+            .attr("cy", d => d.y);
+
+        requestAnimationFrame(tick); // Continue animation
+    }
+
+    // Start the animation loop
+    tick();
+
+    // Create scoreboard
+    d3.select("body").append("div")
+        .attr("id", "scoreboard")
+        .style("position", "absolute")
+        .style("top", "20px")
+        .style("left", "20px")
+        .style("font-size", "20px")
+        .style("color", "white")
+        .text(`Total Clicks: ${totalClicks}`);
+}
+
+// Handle collisions between two nodes (Perfectly elastic)
+function handleCollision(node1, node2) {
+    var dx = node2.x - node1.x;
+    var dy = node2.y - node1.y;
+    var distance = Math.sqrt(dx * dx + dy * dy);
+
+    if (distance < node1.radius + node2.radius) {
+        // Compute the normal vector
+        var normalX = dx / distance;
+        var normalY = dy / distance;
+
+        // Relative velocity along the normal
+        var relativeVelocityX = node2.vx - node1.vx;
+        var relativeVelocityY = node2.vy - node1.vy;
+
+        var dotProduct = relativeVelocityX * normalX + relativeVelocityY * normalY;
+
+        if (dotProduct > 0) return; // If they are moving apart, no collision
+
+        // Elastic collision response
+        var coefficientOfRestitution = 1; // Perfectly elastic collision
+        var impulse = 2 * dotProduct / (node1.radius + node2.radius);
+
+        node1.vx -= impulse * node2.radius * normalX;
+        node1.vy -= impulse * node2.radius * normalY;
+        node2.vx += impulse * node1.radius * normalX;
+        node2.vy += impulse * node1.radius * normalY;
+
+        // Adjust positions to prevent overlap
+        var overlap = node1.radius + node2.radius - distance;
+        node1.x -= overlap * normalX / 2;
+        node1.y -= overlap * normalY / 2;
+        node2.x += overlap * normalX / 2;
+        node2.y += overlap * normalY / 2;
+    }
+}
+
+// Eye listener for gaze-based movement
+var collisionEyeListener = async function (data, clock) {
+    if (!data) return;
+
+    var width = window.innerWidth;
+    var height = window.innerHeight;
+
+    // Update the gaze point location
+    d3.select("#gazePoint")
+        .attr("cx", data.x)
+        .attr("cy", data.y);
+
+    var fmPositions = await webgazer.getTracker().getPositions();
+    var whr = webgazer.getVideoPreviewToCameraResolutionRatio();
+
+    // Update gaze lines
+    d3.select("#eyeline1")
+        .attr("x1", data.x)
+        .attr("y1", data.y)
+        .attr("x2", width - fmPositions[145][0] * whr[0])
+        .attr("y2", fmPositions[145][1] * whr[1]);
+
+    d3.select("#eyeline2")
+        .attr("x1", data.x)
+        .attr("y1", data.y)
+        .attr("x2", width - fmPositions[374][0] * whr[0])
+        .attr("y2", fmPositions[374][1] * whr[1]);
+
+    // Gaze repulsion: Move balls stronger away from gaze
+    nodes.forEach((node) => {
+        if (node.isRed) return; // Skip the red ball
+
+        var distX = node.x - data.x;
+        var distY = node.y - data.y;
+        var distance = Math.sqrt(distX * distX + distY * distY);
+        var moveFactor = MAX_GAZE_REPULSION;
+
+        if (distance < 200) {
+            node.vx += (distX / distance) * moveFactor;
+            node.vy += (distY / distance) * moveFactor;
+        }
+    });
+};
+
+// Mouse listener for interaction
+function mouseListener(event) {
+    var mouseX = event.clientX;
+    var mouseY = event.clientY;
+
+    nodes.forEach((node) => {
+        if (node.isRed) return; // Skip the red ball
+
+        var distX = node.x - mouseX;
+        var distY = node.y - mouseY;
+        var distance = Math.sqrt(distX * distX + distY * distY);
+        var moveFactor = 5;
+
+        if (distance < 200) {
+            node.vx += (distX / distance) * moveFactor;
+            node.vy += (distY / distance) * moveFactor;
+        }
+    });
+}
+document.addEventListener("contextmenu", function (event) {
+  event.preventDefault();
+});
